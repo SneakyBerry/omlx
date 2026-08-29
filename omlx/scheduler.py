@@ -55,6 +55,7 @@ from .exceptions import (
     PrefillMemoryExceededError,
     describe_ceiling_binding,
     is_cache_corruption_error,
+    is_metal_resource_limit_error,
 )
 from .patches.sdpa256_attention import set_unfused_headroom_provider
 from .decode_activity import get_decode_activity
@@ -11516,6 +11517,15 @@ class Scheduler:
         self._boundary_snapshot_diagnostics.clear()
         self._last_prefix_cache_lookup = None
 
+        # Release pooled Metal buffers; the allocator's resource count does
+        # not drop otherwise and the next prefill re-fails at the limit.
+        try:
+            _sync_and_clear_cache(self._stream)
+        except Exception as e:
+            logger.warning(
+                "Metal cache clear failed during cache corruption recovery: %s", e
+            )
+
         # Clear UID mappings
         _unregister_uid_rows_for_model(self.model)
         self.request_id_to_uid.clear()
@@ -11781,10 +11791,15 @@ class Scheduler:
         returns ``False`` so the caller emits the clean
         ``finish_reason="error"``.
 
-        Only memory-limit failures are retried; any other RuntimeError fails
-        immediately so genuine model errors don't loop.
+        Retried failures: the prefill memory ceiling ("Memory limit
+        exceeded") and Metal resource-count exhaustion ([metal::malloc]
+        Resource limit); the catch sites already drained the buffer pool.
+        Any other RuntimeError fails immediately so genuine model errors don't loop.
         """
-        if "Memory limit exceeded" not in str(error):
+        if not (
+            "Memory limit exceeded" in str(error)
+            or is_metal_resource_limit_error(error)
+        ):
             return False
         if request.prefill_oom_retries >= self._MAX_PREFILL_OOM_RETRIES:
             logger.warning(

@@ -634,3 +634,13 @@ def is_cache_corruption_error(error: Exception) -> bool:
     """
     error_str = str(error)
     return any(pattern in error_str for pattern in CACHE_CORRUPTION_PATTERNS)
+
+
+def is_metal_resource_limit_error(error: BaseException) -> bool:
+    """
+    Metal's GPU resource-*count* exhaustion ("[metal::malloc] Resource limit
+    (N) exceeded.", ~499k live MTLBuffers on Apple Silicon) — not a byte
+    limit. Recoverable: clearing the pooled buffers and retrying succeeds.
+    """
+    text = str(error)
+    return "metal::malloc" in text and "Resource limit" in text

@@ -602,9 +602,12 @@ def test_qsa_indexer_batched_decode_handles_per_row_offsets():
     # Row 0 (offset 10): sparse — 4 of 5 blocks visible + tail token kept.
     assert int(mx.sum(decode_mask[0, 0, 0, :10])) == 8
     assert decode_mask[0, 0, 0, 10].item()
-    # Row 1 (offset 8): dense causal window; padded keys stay masked.
-    assert mx.all(decode_mask[1, 0, 0, :9]).item()
-    assert not mx.any(decode_mask[1, 0, 0, 9:]).item()
+    # Row 1 (offset 8): the indexer cache is left-padded to the widest row,
+    # so the first two columns are padding, its 8 real keys stay unmasked
+    # at aligned columns, and the new token is visible.
+    assert not mx.any(decode_mask[1, 0, 0, :2]).item()
+    assert mx.all(decode_mask[1, 0, 0, 2:10]).item()
+    assert decode_mask[1, 0, 0, 10].item()
 
     kv = mx.zeros((2, 1, 1, 4))
     merged.update_and_fetch(kv, kv)

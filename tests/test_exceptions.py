@@ -46,6 +46,7 @@ from omlx.exceptions import (
     MCPToolExecutionError,
     # Helper function
     is_cache_corruption_error,
+    is_metal_resource_limit_error,
     CACHE_CORRUPTION_PATTERNS,
 )
 
@@ -392,6 +393,28 @@ class TestIsCacheCorruptionError:
         """Test completely unrelated error."""
         error = FileNotFoundError("Model file not found")
         assert is_cache_corruption_error(error) is False
+
+
+class TestIsMetalResourceLimitError:
+    """Test cases for is_metal_resource_limit_error helper function."""
+
+    def test_matches_mlx_allocator_error(self):
+        error = RuntimeError("[metal::malloc] Resource limit (499000) exceeded.")
+        assert is_metal_resource_limit_error(error) is True
+
+    def test_rejects_other_malloc_errors(self):
+        error = RuntimeError(
+            "[metal::malloc] Attempting to allocate 999 bytes which is greater than"
+            " the maximum allowed buffer size of 100 bytes."
+        )
+        assert is_metal_resource_limit_error(error) is False
+
+    def test_rejects_omlx_memory_limit(self):
+        error = RuntimeError("Memory limit exceeded during prefill")
+        assert is_metal_resource_limit_error(error) is False
+
+    def test_rejects_unrelated_errors(self):
+        assert is_metal_resource_limit_error(ValueError("nope")) is False
 
 
 class TestCacheCorruptionPatterns:

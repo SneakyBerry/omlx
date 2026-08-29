@@ -63,6 +63,17 @@ _CPU_SHARE_MATERIALIZATION_HEADROOM = 1.5
 # Auto SSD-offload trigger for the Qwen4-Exp PLE table: a resident table above
 # this fraction of physical memory leaves too little for KV/context.
 _PLE_AUTO_OFFLOAD_RESIDENT_FRACTION = 0.70
+# Default RAM budget of the tiered PLE hot table (mirrors the vendored default).
+_PLE_HOT_SET_BYTES_DEFAULT = 2 * 1024**3
+
+
+def _ple_hot_set_bytes(settings: object) -> int:
+    value = getattr(settings, "ple_hot_set_bytes", None) if settings is not None else None
+    try:
+        value = int(value) if value is not None else _PLE_HOT_SET_BYTES_DEFAULT
+    except (TypeError, ValueError):
+        value = _PLE_HOT_SET_BYTES_DEFAULT
+    return max(0, value)
 
 
 def _positive_int(value: object) -> int:
@@ -357,7 +368,13 @@ class EnginePool:
             entry, runtime_settings
         )
         if qwen4_offload and qwen4_estimate is not None:
-            base = min(base, qwen4_estimate.mmap_bytes)
+            # The tier keeps its hot rows in RAM in front of the mmap rows;
+            # only the cold remainder of the PLE table leaves the resident
+            # set. The hot table is allocated eagerly at construction.
+            hot_bytes = min(
+                _ple_hot_set_bytes(runtime_settings), qwen4_estimate.ple_bytes
+            )
+            base = min(base, qwen4_estimate.mmap_bytes + hot_bytes)
         extra = _qwen35_cpu_share_estimated_bytes(entry.model_path, runtime_settings)
         if extra is None:
             # An enabled CPU path with unreadable geometry must not silently
@@ -613,6 +630,10 @@ class EnginePool:
         if entry is not None:
             qwen4_offload, _, _ = self._qwen4_ple_offload_status(entry, settings)
             add("qwen4_ple_ssd_offload", qwen4_offload)
+            if qwen4_offload:
+                # The hot table is allocated at construction; resizing it
+                # requires rebuilding the tier.
+                add("ple_hot_set_bytes", _ple_hot_set_bytes(settings))
 
         turboquant_active = bool(data.get("turboquant_kv_enabled", False))
         add("turboquant_kv_enabled", turboquant_active)

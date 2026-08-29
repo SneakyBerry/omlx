@@ -157,7 +157,14 @@ def test_qwen4_exp_loader_enables_adaptive_depth_three_lightning_mtp(tmp_path):
     assert is_mtp_active() is False
 
 
-def test_qwen4_exp_loader_ple_ssd_offload_setting(tmp_path):
+def test_qwen4_exp_loader_ple_ssd_offload_setting(tmp_path, monkeypatch):
+    # configure_ple_runtime mutates vendor module globals; the tmp_path is
+    # deleted at teardown and a leaked mmap mode would make any later Model()
+    # construction in the session read a dead index path.
+    from mlx_vlm.models.qwen4_exp import language as qwen4_language
+
+    monkeypatch.setattr(qwen4_language, "_PLE_RUNTIME_MODE", "resident")
+    monkeypatch.setattr(qwen4_language, "_PLE_RUNTIME_MODEL_PATH", None)
     (tmp_path / "config.json").write_text(
         json.dumps({"model_type": "qwen4_exp"}), encoding="utf-8"
     )

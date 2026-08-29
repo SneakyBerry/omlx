@@ -910,3 +910,82 @@ class TestCallBackbone:
         assert result[0] is logits
         assert result[1] is hidden
         assert result[2] is gdn
+
+
+def test_qwen35_runtime_patch_preserves_qwen4_exp_capture_convention():
+    """qwen4_exp sets capture_layer_ids=[] (raw hc-width capture); the shared
+    qwen3.5 base patch must pass it through untouched, while qwen3.5 keeps
+    the collapsed last-layer substitution."""
+    from omlx.patches import mlx_vlm_qwen4_exp_compat as compat
+
+    compat.apply_mlx_vlm_qwen4_exp_compat_patch()
+    import mlx_vlm.models.qwen3_5.language as q35
+
+    from omlx.patches.mlx_vlm_mtp import qwen35_vlm_runtime
+
+    initial_call = q35.LanguageModel.__dict__.get("__call__")
+    initial_marker = "_omlx_mtp_runtime_patched" in q35.LanguageModel.__dict__
+
+    captured: dict = {}
+
+    def sentinel(self, inputs, inputs_embeds=None, mask=None, cache=None, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            logits=None,
+            hidden_states=[kwargs.get("capture_layer_ids")],
+            gdn_states=None,
+            shared_kv_states=None,
+        )
+
+    type.__setattr__(q35.LanguageModel, "__call__", sentinel)
+    if "_omlx_mtp_runtime_patched" in q35.LanguageModel.__dict__:
+        type.__delattr__(q35.LanguageModel, "_omlx_mtp_runtime_patched")
+    try:
+        qwen35_vlm_runtime._patch_vlm_language_model(q35)
+        patched_call = q35.LanguageModel.__dict__["__call__"]
+
+        def fake(model_type):
+            # Instances of the patched class (and a subclass for qwen4_exp):
+            # the runtime injects capture ids only on the exact base class and
+            # passes subclasses through untouched (type(self) is not cls).
+            inst = q35.LanguageModel.__new__(q35.LanguageModel)
+            object.__setattr__(inst, "_parameters", {})
+            object.__setattr__(inst, "_buffers", {})
+            object.__setattr__(inst, "_modules", {})
+            inst.model_type = model_type
+            inst.model = SimpleNamespace(layers=[0, 1, 2])
+            return inst
+
+        def fake_sub(model_type):
+            sub = type("Qwen4ExpFake", (q35.LanguageModel,), {})
+            inst = sub.__new__(sub)
+            object.__setattr__(inst, "_parameters", {})
+            object.__setattr__(inst, "_buffers", {})
+            object.__setattr__(inst, "_modules", {})
+            inst.model_type = model_type
+            inst.model = SimpleNamespace(layers=[0, 1, 2])
+            return inst
+
+        captured.clear()
+        out = patched_call(
+            fake_sub("qwen4_exp"),
+            "in",
+            cache=[],
+            return_hidden=True,
+            capture_layer_ids=[],
+        )
+        assert captured["capture_layer_ids"] == []
+        assert out.hidden_states[0] == []
+
+        captured.clear()
+        out = patched_call(
+            fake("qwen3_5"), "in", cache=[], return_hidden=True
+        )
+        assert captured["capture_layer_ids"] == [2]
+        assert out.hidden_states[0] == [2]
+    finally:
+        type.__setattr__(q35.LanguageModel, "__call__", initial_call)
+        if initial_marker:
+            type.__setattr__(q35.LanguageModel, "_omlx_mtp_runtime_patched", True)
+        elif "_omlx_mtp_runtime_patched" in q35.LanguageModel.__dict__:
+            type.__delattr__(q35.LanguageModel, "_omlx_mtp_runtime_patched")

@@ -640,7 +640,7 @@ class TestQwenCpuShareMemoryEstimate:
 
         model = tmp_path / "qwen4"
         model.mkdir()
-        settings = ModelSettings(qwen4_ple_ssd_offload=False)
+        settings = ModelSettings(qwen4_ple_ssd_offload=False, ple_hot_set_bytes=100)
         entry = EngineEntry(
             model_id="qwen4",
             model_path=str(model),
@@ -668,10 +668,11 @@ class TestQwenCpuShareMemoryEstimate:
             effective = pool._effective_qwen4_model_settings(entry, settings)
             signature = dict(pool._engine_runtime_signature("qwen4", settings))
 
-        assert projected == 400
+        assert projected == 500  # mmap rows + eagerly allocated hot table
         assert settings.qwen4_ple_ssd_offload is False
         assert effective.qwen4_ple_ssd_offload is True
         assert signature["qwen4_ple_ssd_offload"] == "True"
+        assert signature["ple_hot_set_bytes"] == "100"
 
     def test_qwen4_ple_auto_offload_when_table_exceeds_memory(self, tmp_path):
         from omlx.model_settings import ModelSettings
