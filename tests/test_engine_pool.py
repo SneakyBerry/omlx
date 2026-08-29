@@ -673,6 +673,72 @@ class TestQwenCpuShareMemoryEstimate:
         assert effective.qwen4_ple_ssd_offload is True
         assert signature["qwen4_ple_ssd_offload"] == "True"
 
+    def test_qwen4_ple_auto_offload_when_table_exceeds_memory(self, tmp_path):
+        from omlx.model_settings import ModelSettings
+        from omlx.patches.mlx_vlm_qwen4_exp_compat.residency import (
+            Qwen4ExpResidencyEstimate,
+        )
+
+        model = tmp_path / "qwen4"
+        model.mkdir()
+        settings = ModelSettings()  # qwen4_ple_ssd_offload unset -> auto
+        entry = EngineEntry(
+            model_id="qwen4",
+            model_path=str(model),
+            model_type="vlm",
+            engine_type="vlm",
+            config_model_type="qwen4_exp",
+            estimated_size=1000,
+        )
+        estimate = Qwen4ExpResidencyEstimate(
+            supported=True,
+            checkpoint_bytes=1000,
+            ple_bytes=600,
+            resident_bytes=1000,
+            mmap_bytes=400,
+        )
+        pool = _make_pool(ceiling=5000)
+        pool._entries[entry.model_id] = entry
+
+        with (
+            patch(
+                "omlx.patches.mlx_vlm_qwen4_exp_compat.residency."
+                "qwen4_exp_residency_estimate",
+                return_value=estimate,
+            ),
+            patch(
+                "omlx.engine_pool.os.sysconf",
+                side_effect=[1024, 1],
+            ),
+        ):
+            # physical = 1024 bytes -> resident table (1000) > 70% of memory
+            offload, forced, resolved = pool._qwen4_ple_offload_status(
+                entry, settings
+            )
+            assert offload is True
+            assert forced is False  # auto decided, not ceiling-forced
+            assert resolved is estimate
+
+        # Explicit False is auto too; force-resident lives in
+        # OMLX_QWEN4_PLE_MODE / the artifact, not this toggle.
+        settings_off = ModelSettings(qwen4_ple_ssd_offload=False)
+        with (
+            patch(
+                "omlx.patches.mlx_vlm_qwen4_exp_compat.residency."
+                "qwen4_exp_residency_estimate",
+                return_value=estimate,
+            ),
+            patch(
+                "omlx.engine_pool.os.sysconf",
+                side_effect=[1024, 1],
+            ),
+        ):
+            offload, forced, _ = pool._qwen4_ple_offload_status(
+                entry, settings_off
+            )
+        assert offload is True
+        assert forced is False
+
 
 class TestApplySettingsOverrides:
     """Tests for apply_settings_overrides method."""

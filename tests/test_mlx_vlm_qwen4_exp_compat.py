@@ -750,6 +750,28 @@ def test_qwen4_adapter_cache_only_prefill_skips_vocab_projection():
     assert offsets and max(offsets) == 4
 
 
+def test_qsa_append_indexer_positions_broadcasts_mixed_mrope_layouts():
+    compat.apply_mlx_vlm_qwen4_exp_compat_patch()
+    from mlx_vlm.models.qwen4_exp.language import _append_indexer_positions
+
+    # Multimodal prefix (3 MRoPE components) continued by a text chunk (1).
+    out = _append_indexer_positions(
+        mx.zeros((3, 4), dtype=mx.int64), mx.ones((1, 2), dtype=mx.int64)
+    )
+    assert out.shape == (3, 6)
+
+    # And the reverse order.
+    out = _append_indexer_positions(
+        mx.zeros((1, 4), dtype=mx.int64), mx.ones((3, 2), dtype=mx.int64)
+    )
+    assert out.shape == (3, 6)
+
+    # Genuinely incompatible leading extents still raise.
+    with pytest.raises(ValueError):
+        _append_indexer_positions(
+            mx.zeros((2, 4), dtype=mx.int64), mx.ones((3, 2), dtype=mx.int64)
+        )
+
 
 def test_qwen4_batch_factory_honors_model_owned_cache_conversion():
     compat.apply_mlx_vlm_qwen4_exp_compat_patch()
@@ -783,6 +805,107 @@ def test_qwen4_batch_factory_honors_model_owned_cache_conversion():
     assert mx.array_equal(
         caches[0].index_position_ids, qsa_cache.index_position_ids
     ).item()
+
+
+def _qsa_block_state(start: int, seq: int, components: int) -> dict:
+    """Build one serialized QSA block state with the given MRoPE width."""
+    keys = mx.arange(start, start + 1 * 2 * seq * 3, dtype=mx.float32).reshape(
+        1, 2, seq, 3
+    )
+    values = keys + 100
+    index_keys = mx.arange(start, start + 1 * seq * 3, dtype=mx.float32).reshape(
+        1, seq, 3
+    )
+    base = mx.arange(start, start + seq, dtype=mx.int32)
+    if components == 1:
+        positions = base[None, None, :]
+    else:
+        positions = mx.stack([base, base + 100, base + 200])[None]
+    return {
+        "states": (keys, values, index_keys, positions),
+        "keys": keys,
+        "values": values,
+        "index_keys": index_keys,
+        "index_position_ids": positions,
+        "cache_type": "Qwen4QSAKVCache",
+    }
+
+
+def test_qsa_concatenate_states_broadcasts_mixed_component_blocks():
+    """Regression: chains mixing text-only (C=1) and multimodal (C=3) QSA
+    position blocks failed reconstruction with a concatenate shape error,
+    forcing full re-prefills (reused=0) every turn."""
+    from omlx.cache.type_handlers import Qwen4QSAKVCacheHandler
+
+    handler = Qwen4QSAKVCacheHandler()
+    text_block = _qsa_block_state(0, 4, 1)
+    mm_block = _qsa_block_state(50, 2, 3)
+
+    out = handler.concatenate_states([text_block, mm_block])
+
+    positions = out["states"][3]
+    assert positions.shape == (1, 3, 6)
+    mx.eval(positions)
+    # C=1 text block broadcast component-invariantly, values preserved.
+    expected_text = mx.broadcast_to(
+        mx.arange(4, dtype=mx.int32)[None, None, :], (1, 3, 4)
+    )
+    assert mx.array_equal(positions[:, :, :4], expected_text).item()
+    assert mx.array_equal(positions[:, :, 4:], mm_block["states"][3]).item()
+
+    # The model-facing reconstruction must also work on the merged chain.
+    cache = handler.reconstruct_cache(out)
+    assert cache.index_position_ids.shape == (3, 1, 6)
+
+
+def test_qsa_concatenate_states_keeps_uniform_component_width():
+    """All-text chains keep the C=1 layout (deserialize collapses to 2-D)."""
+    from omlx.cache.type_handlers import Qwen4QSAKVCacheHandler
+
+    handler = Qwen4QSAKVCacheHandler()
+
+    out = handler.concatenate_states(
+        [_qsa_block_state(0, 4, 1), _qsa_block_state(10, 2, 1)]
+    )
+
+    assert out["states"][3].shape == (1, 1, 6)
+    cache = handler.reconstruct_cache(out)
+    assert cache.index_position_ids.shape == (1, 6)
+
+
+def test_qsa_singleton_extend_cache_layer_converts_to_batch():
+    """Regression: late-join batch merge hit '.extend' on a singleton
+    QSAKVCache, which _to_batched_cache_layer did not convert."""
+    compat.apply_mlx_vlm_qwen4_exp_compat_patch()
+    from mlx_vlm.models.qwen4_exp.language import BatchQSAKVCache, QSAKVCache
+
+    import omlx.scheduler as scheduler_module
+
+    def warm(start: int) -> QSAKVCache:
+        cache = QSAKVCache()
+        cache.state = (
+            mx.arange(start, start + 8, dtype=mx.float32).reshape(1, 2, 2, 2),
+            mx.arange(start + 8, start + 16, dtype=mx.float32).reshape(1, 2, 2, 2),
+            mx.arange(start, start + 4, dtype=mx.float32).reshape(1, 2, 2),
+            mx.array([[start, start + 1]], dtype=mx.int32),
+        )
+        return cache
+
+    row_a = warm(0)
+    row_b = warm(10)
+
+    merged = scheduler_module._extend_cache_layer(row_a, row_b)
+
+    assert isinstance(merged, BatchQSAKVCache)
+    keys, values, offset, left_padding = merged.kv_cache.state
+    mx.eval(keys, values, offset, left_padding, merged.index_keys)
+    assert offset.shape[0] == 2
+    assert merged.index_keys.shape[0] == 2
+    assert merged.index_offset == 2
+    assert merged.index_position_ids.shape[0] == 2
+    # Row contents preserved through the conversion.
+    assert mx.array_equal(merged.index_keys[0], row_a.index_keys[0]).item()
+    assert mx.array_equal(merged.index_keys[1], row_b.index_keys[0]).item()
 
 
 def test_qwen4_fp8_ple_dequantizes_only_selected_rows():

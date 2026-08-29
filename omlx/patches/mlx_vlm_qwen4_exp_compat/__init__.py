@@ -72,14 +72,17 @@ def configure_qwen4_exp_runtime(
     mode: str | None = None,
     *,
     mtp_enabled: bool = False,
+    hot_set_bytes: int | None = None,
 ) -> str:
     """Select PLE storage and optional Lightning MTP before construction."""
     apply_mlx_vlm_qwen4_exp_compat_patch()
     from mlx_vlm.models.qwen4_exp.language import (
         configure_mtp_runtime,
+        configure_ple_hot_set,
         configure_ple_runtime,
     )
 
+    configure_ple_hot_set(hot_set_bytes)
     resolved = configure_ple_runtime(model_path, mode=mode)
     mtp_runtime = configure_mtp_runtime(model_path, enabled=mtp_enabled)
     logger.info("Qwen4-Exp PLE mode for %s: %s", model_path, resolved)

@@ -215,7 +215,7 @@ async def test_qwen4_ple_ssd_offload_is_ignored_for_other_models():
         admin_routes.ModelSettingsRequest(qwen4_ple_ssd_offload=True),
     )
 
-    assert settings.qwen4_ple_ssd_offload is False
+    assert settings.qwen4_ple_ssd_offload is None
 
 
 @pytest.mark.asyncio

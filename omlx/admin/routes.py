@@ -138,6 +138,7 @@ class ModelSettingsRequest(BaseModel):
     # template supports it). Mirrors ModelSettings.preserve_thinking.
     preserve_thinking: bool | None = None
     qwen4_ple_ssd_offload: bool | None = None
+    ple_hot_set_bytes: int | None = None
     thinking_budget_enabled: bool | None = None
     thinking_budget_tokens: int | None = None
     # MTP draft tokens per cycle for legacy MTP (None = adaptive default).
@@ -2356,9 +2357,14 @@ async def update_model_settings(
         is_qwen4_exp = (entry.config_model_type or "").replace(
             "-", "_"
         ).lower() == "qwen4_exp"
-        current_settings.qwen4_ple_ssd_offload = bool(
-            request.qwen4_ple_ssd_offload and is_qwen4_exp
-        )
+        if is_qwen4_exp:
+            # Tri-state: True = SSD offload, False/None = auto.
+            current_settings.qwen4_ple_ssd_offload = (
+                request.qwen4_ple_ssd_offload
+            )
+    if "ple_hot_set_bytes" in sent:
+        value = request.ple_hot_set_bytes
+        current_settings.ple_hot_set_bytes = int(value) if value else None
     if "thinking_budget_enabled" in sent:
         current_settings.thinking_budget_enabled = (
             request.thinking_budget_enabled or False

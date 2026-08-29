@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import mmap
 import os
@@ -124,6 +125,25 @@ def get_ple_runtime_mode() -> str:
     return _PLE_RUNTIME_MODE
 
 
+logger = logging.getLogger(__name__)
+
+_PLE_HOT_SET_BYTES = 2 * 1024 * 1024 * 1024
+_PLE_HOT_SET_BYTES_DEFAULT = _PLE_HOT_SET_BYTES
+
+
+def configure_ple_hot_set(hot_set_bytes: int | None) -> None:
+    """Bind the RAM budget of the tiered PLE hot set before model construction.
+
+    ``None`` resets to the engine default instead of inheriting whatever the
+    previously loaded model configured."""
+    global _PLE_HOT_SET_BYTES
+    _PLE_HOT_SET_BYTES = (
+        int(hot_set_bytes)
+        if hot_set_bytes is not None
+        else _PLE_HOT_SET_BYTES_DEFAULT
+    )
+
+
 def _append_indexer_positions(
     cached: Optional[mx.array], position_ids: mx.array
 ) -> mx.array:
@@ -136,6 +156,24 @@ def _append_indexer_positions(
         )
     elif cached.ndim == 2 and position_ids.ndim == 3:
         cached = mx.broadcast_to(cached[None], (position_ids.shape[0], *cached.shape))
+    elif cached.ndim == position_ids.ndim == 2 and (
+        cached.shape[0] != position_ids.shape[0]
+    ):
+        # Mixed text (C=1) and MRoPE (C>1) components: text positions are
+        # component-invariant, so broadcast the narrow side.
+        if cached.shape[0] == 1:
+            cached = mx.broadcast_to(
+                cached, (position_ids.shape[0], cached.shape[1])
+            )
+        elif position_ids.shape[0] == 1:
+            position_ids = mx.broadcast_to(
+                position_ids, (cached.shape[0], position_ids.shape[1])
+            )
+        else:
+            raise ValueError(
+                "QSA position IDs must share their leading dimension, "
+                f"got cached={cached.shape} and current={position_ids.shape}."
+            )
     elif cached.ndim != position_ids.ndim:
         raise ValueError(
             "QSA position IDs must be 2-D text positions or 3-D MRoPE positions, "
@@ -2046,6 +2084,40 @@ def fuse_resident_ple_embeddings(
     return fused
 
 
+def _build_tiered_ple_embedding(
+    model_path: Path,
+    prefix: str,
+    num_embeddings: int,
+    dims: int,
+    num_shards: int,
+) -> nn.Module:
+    """Build the oMLX tiered PLE embedding (RAM slot-table hot set in front of
+    the SSD mmap rows), falling back to the bare mmap embedding. Placement
+    affects speed, never outputs."""
+    try:
+        from omlx.patches.qwen4_exp import (
+            DiskBackedShardedEmbedding as TieredEmbedding,
+        )
+
+        embedding = TieredEmbedding(
+            model_path,
+            prefix,
+            num_embeddings,
+            dims,
+            num_shards,
+            hot_set_bytes=_PLE_HOT_SET_BYTES,
+        )
+        logger.info(
+            "Tiered PLE embedding active (%d hot-set bytes)", _PLE_HOT_SET_BYTES
+        )
+        return embedding
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Tiered PLE embedding unavailable (%s); bare mmap", exc)
+        return DiskBackedShardedEmbedding(
+            model_path, prefix, num_embeddings, dims, num_shards
+        )
+
+
 class Qwen4ExpNGramEmbedding(nn.Module):
     def __init__(
         self,
@@ -2100,7 +2172,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                 f"model.language_model.layers.{layer_idx}.ple.ple_embedding."
                 "ngram_embedding"
             )
-            self.ngram_embedding = DiskBackedShardedEmbedding(
+            self.ngram_embedding = _build_tiered_ple_embedding(
                 _PLE_RUNTIME_MODEL_PATH,
                 prefix,
                 *embedding_args,

@@ -665,15 +665,21 @@ def maybe_apply_pre_load_patches(
             )
             set_mtp_active(False)
             mtp_active = False
+        ple_flag = (
+            getattr(model_settings, "qwen4_ple_ssd_offload", None)
+            if model_settings is not None
+            else None
+        )
         configure_qwen4_exp_runtime(
             model_name,
-            mode=(
-                "mmap"
-                if model_settings is not None
-                and getattr(model_settings, "qwen4_ple_ssd_offload", False)
-                else "resident" if model_settings is not None else None
-            ),
+            # True = force SSD; False/None = vendor auto (size vs memory).
+            mode="mmap" if ple_flag is True else None,
             mtp_enabled=mtp_active,
+            hot_set_bytes=(
+                getattr(model_settings, "ple_hot_set_bytes", None)
+                if model_settings is not None
+                else None
+            ),
         )
 
     if for_vlm and model_type == "glm5_next":

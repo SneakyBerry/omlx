@@ -104,6 +104,7 @@ EXCLUDED_FROM_PROFILES = frozenset(
         "ttl_seconds",
         # Hardware-specific residency choice; never propagate across models.
         "qwen4_ple_ssd_offload",
+        "ple_hot_set_bytes",
         # Security flag must be explicit per model — never propagated via profiles.
         "trust_remote_code",
     }

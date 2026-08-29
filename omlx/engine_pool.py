@@ -18,6 +18,7 @@ import copy
 import gc
 import json
 import logging
+import os
 import time
 from collections import OrderedDict
 from contextlib import asynccontextmanager
@@ -59,6 +60,9 @@ logger = logging.getLogger(__name__)
 _FP16_BYTES = 2
 _MAX_AFFINE_BYTES_PER_WEIGHT = 1.0625  # q8 plus fp16 scale/bias per group
 _CPU_SHARE_MATERIALIZATION_HEADROOM = 1.5
+# Auto SSD-offload trigger for the Qwen4-Exp PLE table: a resident table above
+# this fraction of physical memory leaves too little for KV/context.
+_PLE_AUTO_OFFLOAD_RESIDENT_FRACTION = 0.70
 
 
 def _positive_int(value: object) -> int:
@@ -400,9 +404,24 @@ class EnginePool:
         if ceiling <= 0:
             ceiling = self._current_ceiling()
         forced = estimate.force_ssd_offload(ceiling)
-        requested = bool(
-            settings is not None and getattr(settings, "qwen4_ple_ssd_offload", False)
+        flag = (
+            None
+            if settings is None
+            else getattr(settings, "qwen4_ple_ssd_offload", None)
         )
+        if flag is True:
+            requested = True
+        else:
+            # False/None = auto: keep RAM free for context when a resident
+            # PLE table would eat most of physical memory (vendor
+            # resolve_ple_runtime_mode uses the same 70% rule; force-resident
+            # lives in OMLX_QWEN4_PLE_MODE / the artifact, not this toggle).
+            physical = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+            requested = bool(
+                estimate.supported
+                and estimate.resident_bytes
+                > _PLE_AUTO_OFFLOAD_RESIDENT_FRACTION * physical
+            )
         return requested or forced, forced, estimate if estimate.supported else None
 
     def _effective_qwen4_model_settings(

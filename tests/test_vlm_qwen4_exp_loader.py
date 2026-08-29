@@ -157,11 +157,13 @@ def test_qwen4_exp_loader_enables_adaptive_depth_three_lightning_mtp(tmp_path):
     assert is_mtp_active() is False
 
 
-def test_qwen4_exp_loader_uses_explicit_ple_ssd_offload_setting(tmp_path):
+def test_qwen4_exp_loader_ple_ssd_offload_setting(tmp_path):
     (tmp_path / "config.json").write_text(
         json.dumps({"model_type": "qwen4_exp"}), encoding="utf-8"
     )
 
+    # False/unset = auto: the vendor resolves by checkpoint size vs memory,
+    # and an empty checkpoint resolves to resident.
     maybe_apply_pre_load_patches(
         str(tmp_path),
         SimpleNamespace(mtp_enabled=False, qwen4_ple_ssd_offload=False),
